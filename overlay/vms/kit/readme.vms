@@ -1,0 +1,73 @@
+flex for OpenVMS
+================
+
+This is flex @VERSION@, the fast lexical analyser generator, built natively
+for OpenVMS @ARCH@ from the unmodified release plus the patches in the
+vms-flex project:
+
+    https://github.com/issinoho/vms-flex
+
+Kit version: @KITVERSION@.  flex is free software under a BSD-style
+licence; see COPYING.  The manual is FLEX.TXT; FLEX.1 is the manual page;
+WC.L is a small example scanner (a word counter).
+
+flex needs GNU m4 at run time: the M4 kit (https://github.com/issinoho/vms-m4)
+is a prerequisite.
+
+What is installed
+-----------------
+    FLEX$ROOT:[BIN]FLEX.EXE             flex
+    FLEX$ROOT:[LIB]LIBFL.OLB            yywrap() and main() for scanners
+                                        compiled with the default
+                                        /NAMES=(UPPERCASE,TRUNCATED)
+    FLEX$ROOT:[LIB]LIBFL_AS_IS.OLB      the same, for /NAMES=(AS_IS,SHORTENED)
+    FLEX$ROOT:[INCLUDE]FLEXLEXER.H      the header for C++ scanners
+    FLEX$ROOT:[000000]FLEX$SETUP.COM    defines the flex command
+    FLEX$ROOT:[DOC]                     this file, COPYING, NEWS, FLEX.TXT,
+                                        FLEX.1, WC.L
+    SYS$STARTUP:FLEX$STARTUP.COM        defines FLEX$ROOT
+
+Setting up
+----------
+The kit installs FLEX$STARTUP.COM into SYS$STARTUP and runs it once.  To
+define FLEX$ROOT at every boot, the system manager adds this line to
+SYS$MANAGER:SYSTARTUP_VMS.COM, after the one for M4$STARTUP.COM:
+
+    $ @SYS$STARTUP:FLEX$STARTUP.COM
+
+Each user (or SYLOGIN.COM, for everyone) then defines the command:
+
+    $ @FLEX$ROOT:[000000]FLEX$SETUP.COM
+
+Using flex
+----------
+    $ flex --header-file=wc.h -o wc.c wc.l
+    $ cc wc.c
+    $ link wc, FLEX$ROOT:[LIB]LIBFL/LIBRARY
+
+Link a scanner compiled with /NAMES=(AS_IS,SHORTENED) with LIBFL_AS_IS.OLB
+instead; a scanner that defines its own yywrap() (or uses
+%option noyywrap) and main() needs neither.  Name the output with -o: the
+default name, lex.yy.c, needs an ODS-5 disk.  -t writes the scanner to
+SYS$OUTPUT.
+
+flex runs m4 as M4$ROOT:[BIN]M4.EXE; the logical name (or environment
+variable) M4 overrides it.  m4 runs in a subprocess when flex has written
+the scanner, with its input and output in temporary files in SYS$SCRATCH.
+
+Upper-case options and batch jobs
+---------------------------------
+Under the TRADITIONAL DCL parse style DCL upper-cases the unquoted parts of
+a command and the C run-time library passes them to flex in lower case, so
+an unquoted -B (batch) arrives as -b (backing-up report), -I as -i, -L as
+-l and -Cf as -cf.  Batch jobs use TRADITIONAL even when interactive logins
+are set to EXTENDED.  Use the long options (--batch, --noline), quote the
+short ones ("-B"), or start the procedure with
+
+    $ SET PROCESS/PARSE_STYLE=EXTENDED
+
+Exit status
+-----------
+Under DCL a failed run exits with an error-severity status, so ON ERROR and
+IF .NOT. $STATUS work; flex's exit code N is ($STATUS .AND. %X7F8) / 8.
+Under a GNV shell, $? is the exit code as on Unix.

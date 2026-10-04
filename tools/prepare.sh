@@ -85,16 +85,22 @@ printvar() {  # printvar <dir> <make variable>
 cp "$hostcfg/src/config.h" "$stage/src/config.h"
 
 # --- 5. MMS source lists ---------------------------------------------------
-# The "library" is libfl (yywrap, main for lex programs), from src/;
-# gen_mms.py takes its base directory from GEN_MMS_LIB_BASE.
-lib_srcs=$(printvar src libfl_la_SOURCES | tr ' ' '\n' | grep '\.c$' | sort -u)
+# libfl is built twice by explicit rules in descrip.mms (default and AS_IS
+# names), so it is not in the generated lists; check it is still two files.
+libfl=$(printvar src libfl_la_SOURCES | tr ' ' '\n' | grep '\.c$' | sort | tr '\n' ' ')
+[ "$libfl" = "libmain.c libyywrap.c " ] || die "libfl sources changed: $libfl (update descrip.mms)"
+lib_srcs=
 # flex itself: its sources plus scan.c, the shipped scanner (the Makefile
 # copies it to stage1scan.c when not bootstrapping).
-src_srcs=$( { printvar src flex_SOURCES; echo scan.c; } | tr ' ' '\n' | grep '\.c$' | sort -u)
+# The grammar is listed as parse.y; the release ships the generated parse.c.
+src_srcs=$( { printvar src flex_SOURCES; echo scan.c; } | tr ' ' '\n' | sed 's/\.y$/.c/' |
+           grep '\.c$' | sort -u)
+for f in $src_srcs; do [ -f "$stage/src/$f" ] || die "no src/$f in the release"; done
 # Replacement functions from lib/ that configure asks for (LIBOBJS, e.g.
 # ${LIBOBJDIR}realloc.o): compiled into flex with the VMS-only sources.
 libobjs=$(printvar src LIBOBJS | tr ' ' '\n' | sed -n 's|.*/||; s/\.o$/.c/p')
 for list in "$lib_srcs" "$src_srcs"; do
+    [ -n "$list" ] || continue
     dups=$(echo "$list" | xargs -n1 basename | sort | uniq -d)
     [ -z "$dups" ] || die "duplicate object names: $dups"
 done
@@ -106,6 +112,41 @@ echo "$src_srcs" > "$hostcfg/src-sources.txt"
   for f in $libobjs; do echo "lib/$f"; done; } > "$hostcfg/extra-sources.txt"
 GEN_MMS_LIB_BASE=src GEN_MMS_CONFIG_DIR=SRC python3 "$top/tools/gen_mms.py" "$cfgdir/ccflags.txt" "$hostcfg/lib-sources.txt" \
     "$hostcfg/src-sources.txt" "$hostcfg/extra-sources.txt" > "$stage/vms/sources.mms"
+
+# --- PCSI kit inputs (vms/kit/MAKE_KIT.COM builds the kit on each node) ----
+step "PCSI kit inputs"
+: "${KIT_PRODUCER:=ISSINOHO}"
+# Three-part versions: the third part is the PCSI update and our VMS patch
+# level the ECO, as in vms-bison, so 2.6.4-vms1 is V2.6-4E1.
+IFS=. read -r major minor update _ <<< "$UPSTREAM_VERSION"
+pcsiversion="V$major.$minor-${update:-0}E$VMS_PATCH_LEVEL"
+kitversion="$UPSTREAM_VERSION-vms$VMS_PATCH_LEVEL"
+kit=$stage/vms/kit
+subst() {
+    sed -e "s/@PRODUCER@/$KIT_PRODUCER/g" -e "s/@BASE@/$1/g" \
+        -e "s/@PCSIVERSION@/$pcsiversion/g" -e "s/@VERSION@/$UPSTREAM_VERSION/g" \
+        -e "s/@KITVERSION@/$kitversion/g" -e "s/@ARCH@/$2/g"
+}
+for base in I64VMS X86VMS; do
+    subst $base "" < "$kit/flex.pcsi\$desc_template" > "$kit/FLEX-$base.PCSI\$DESC"
+    subst $base "" < "$kit/flex.pcsi\$text_template" > "$kit/FLEX-$base.PCSI\$TEXT"
+done
+rm -f "$kit/flex.pcsi\$desc_template" "$kit/flex.pcsi\$text_template"
+mv "$kit/flex\$startup.com" "$kit/FLEX\$STARTUP.COM"
+mv "$kit/flex\$setup.com" "$kit/FLEX\$SETUP.COM"
+subst "" "IA64 and x86-64" < "$kit/readme.vms" > "$kit/README.VMS"; rm -f "$kit/readme.vms"
+mkdir -p "$kit/doc"
+cp "$stage/COPYING" "$kit/doc/COPYING."
+cp "$stage/NEWS" "$kit/doc/NEWS."
+cp "$stage/doc/flex.1" "$kit/doc/FLEX.1"
+cp "$stage/vms/wc.l" "$kit/doc/WC.L"
+# The manual: the doc/flex.info* files are plain text apart from Info's
+# control lines (no makeinfo needed on the host).
+cat "$stage/doc/flex.info-"[0-9]* |
+    sed -e '/^\x1f/d' -e '/^Tag Table:/,$d' -e 's/\x7f[0-9]*//' |
+    tr -d '\000-\010\016-\037\177' > "$kit/doc/FLEX.TXT"
+printf 'KIT_PRODUCER=%s\nPCSI_VERSION=%s\nKIT_VERSION=%s\n' "$KIT_PRODUCER" "$pcsiversion" \
+    "$kitversion" > "$kit/kit.env"
 
 # --- snapshot: the resolved configuration, committed and reviewed ----------
 mkdir -p "$snapshot"

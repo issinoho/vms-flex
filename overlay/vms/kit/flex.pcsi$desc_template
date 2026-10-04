@@ -1,0 +1,38 @@
+--
+-- PCSI product description for flex on OpenVMS.
+-- Template: tools/prepare.sh substitutes @PRODUCER@, @BASE@ and @PCSIVERSION@.
+--
+product @PRODUCER@ @BASE@ FLEX @PCSIVERSION@ full ;
+
+    -- flex runs GNU m4 (github.com/issinoho/vms-m4) to generate scanners.
+    software @PRODUCER@ @BASE@ M4 ;
+
+    information RELEASE_NOTES phase after ;
+
+    directory [FLEX] ;
+    directory [FLEX.BIN] ;
+    directory [FLEX.LIB] ;
+    directory [FLEX.INCLUDE] ;
+    directory [FLEX.DOC] ;
+    file [FLEX.BIN]FLEX.EXE ;
+    file [FLEX.LIB]LIBFL.OLB ;
+    file [FLEX.LIB]LIBFL_AS_IS.OLB ;
+    file [FLEX.INCLUDE]FLEXLEXER.H ;
+    file [SYS$STARTUP]FLEX$STARTUP.COM ;
+    file [FLEX]FLEX$SETUP.COM ;
+    file [FLEX.DOC]README.VMS ;
+    file [FLEX.DOC]COPYING. ;
+    file [FLEX.DOC]NEWS. ;
+    file [FLEX.DOC]FLEX.TXT ;
+    file [FLEX.DOC]FLEX.1 ;
+    file [FLEX.DOC]WC.L ;
+
+    -- Define FLEX$ROOT now and print the post-installation tasks (PCSI shows
+    -- only the title of an information message unless /HELP is given).
+    execute postinstall "@PCSI$DESTINATION:[SYS$STARTUP]FLEX$STARTUP.COM INSTALL" interactive ;
+    -- On removal, deassign FLEX$ROOT.
+    execute install "CONTINUE" remove "@PCSI$DESTINATION:[SYS$STARTUP]FLEX$STARTUP.COM REMOVE" ;
+
+    information POST_INSTALL phase after ;
+
+end product ;
