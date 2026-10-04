@@ -20,7 +20,7 @@ LIB = $(OBJ)LIBFL.OLB
 EXE = $(BIN)FLEX.EXE
 
 CC = CC
-CFLAGS = $(CC_QUAL)/NOLIST/INCLUDE_DIRECTORY=("./src","./vms")-
+CFLAGS = $(CC_QUAL)/NOLIST/INCLUDE_DIRECTORY=("./src","./vms","PCRE2$ROOT:[INCLUDE]")-
 	/DEFINE=($(CC_DEFS),HAVE_CONFIG_H)
 
 ! LIBFL.OLB is flex's runtime library for lex programs (yywrap, main),
@@ -31,8 +31,10 @@ ALL : $(EXE), $(LIB)
 ! "-": LINK ends with a warning status (%ILINK-W-COMPWARN) when modules
 ! compiled with VSI C's benign warnings; tools/build.sh fails the build on
 ! real link errors and undefined symbols.
+! POSIX regex from PCRE2 (vms/regex.h): PCRE2$ROOT is the vms-pcre2 install tree.
 $(EXE) : $(SRC_OBJS), $(EXTRA_OBJS)
-	- LINK/EXECUTABLE=$(MMS$TARGET)/MAP=$(OBJ)FLEX.MAP/FULL $(SRC_OBJS), $(EXTRA_OBJS)
+	- LINK/EXECUTABLE=$(MMS$TARGET)/MAP=$(OBJ)FLEX.MAP/FULL $(SRC_OBJS), $(EXTRA_OBJS), -
+	PCRE2$ROOT:[LIB]PCRE2-POSIX.OLB/LIBRARY, PCRE2$ROOT:[LIB]PCRE2-8.OLB/LIBRARY
 
 $(LIB) : $(LIB_OBJS)
 	IF F$SEARCH("$(MMS$TARGET)") .EQS. "" THEN LIBRARY/CREATE/OBJECT $(MMS$TARGET)

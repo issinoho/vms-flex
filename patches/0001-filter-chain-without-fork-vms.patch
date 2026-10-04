@@ -1,0 +1,508 @@
+Subject: src: on OpenVMS, run the output filter chain without fork()
+
+flex sends its output through a chain of processes connected by pipes:
+tee_header (a forked copy of flex) splits off the header, m4 expands each
+branch, and fix_linedirs (another forked flex) corrects the #line
+directives.  OpenVMS has no fork().  Every stage reads all its input
+before it ends, so on VMS the stages run one after another over temporary
+files in SYS$SCRATCH once flex has finished writing:
+
+- filter_apply_chain() diverts flex's output to a file and keeps a
+  duplicate of the real output descriptor (the -o file, or stdout);
+- filter_vms_finish(), called from flex_main()'s exit path in place of
+  the wait() loop, runs tee_header, then for each branch m4 (started with
+  vfork()/execv(), standard input and output redirected; a failed execv()
+  returns in flex, so it is reported, not _exit()ed) and fix_linedirs.
+
+The text of tee_header and the work of fix_linedirs move into
+tee_header_streams() and fix_linedirs_streams(), which the Unix filters
+call on stdin/stdout as before.  m4 defaults to the M4 kit,
+M4$ROOT:[BIN]M4.EXE (the M4 logical name overrides it), and main() exits
+through vms_exit() so that a failed run has error severity under DCL.
+
+--- a/src/filter.c	2026-10-04 23:10:14.436124398 +0100
++++ b/src/filter.c	2026-10-04 23:11:19.434701615 +0100
+@@ -22,6 +22,15 @@
+ /*  PURPOSE. */
+ 
+ #include "flexdef.h"
++static void tee_header_streams (FILE *in, FILE *to_c, FILE *to_h);
++static void fix_linedirs_streams (FILE *in, FILE *out);
++#ifdef __VMS
++# include <descrip.h>
++# include <fcntl.h>
++# include <lib$routines.h>
++# include <unistd.h>
++# include <wait.h>
++#endif
+ static const char * check_4_gnu_m4 =
+     "m4_dnl ifdef(`__gnu__', ,"
+     "`errprint(Flex requires GNU M4. Set the PATH or set the M4 environment variable to its path name.)"
+@@ -121,6 +130,232 @@
+ 	return f;
+ }
+ 
++#ifdef __VMS
++/* OpenVMS has no fork(), so the filter chain cannot run as a pipeline of
++   processes.  Every stage reads all its input before it ends, so on VMS the
++   stages run one after another over temporary files in SYS$SCRATCH when
++   flex has finished writing: filter_apply_chain() only diverts flex's
++   output to a file and remembers where the real output goes, and
++   filter_vms_finish() (called from flex_main() at the end) runs the chain:
++   tee_header splits the C file and the header, and each goes through m4
++   (a separate process, started with vfork() and execv()) and fix_linedirs
++   (here, in flex).  */
++
++static struct filter *vms_chain;	/* the chain to run at the end */
++static int vms_out_fd = -1;		/* the real output (-o file or stdout) */
++static char vms_raw_name[80];		/* flex's own output */
++
++static void vms_tmp_name (char *buf, size_t size, const char *what)
++{
++	static unsigned int counter;
++	snprintf (buf, size, "SYS$SCRATCH:FLEX_%08X_%u_%s.TMP",
++		  (unsigned int) getpid (), ++counter, what);
++}
++
++/* Delete every version of NAME (a subprocess can leave a new version of a
++   file redirected to it).  */
++static void vms_delete_all (const char *name)
++{
++	char spec[96];
++	struct dsc$descriptor_s d;
++	snprintf (spec, sizeof spec, "%s;*", name);
++	d.dsc$w_length = (unsigned short) strlen (spec);
++	d.dsc$b_dtype = DSC$K_DTYPE_T;
++	d.dsc$b_class = DSC$K_CLASS_S;
++	d.dsc$a_pointer = spec;
++	lib$delete_file (&d, 0, 0, 0, 0, 0, 0, 0, 0, 0);
++}
++
++/* Errors here cannot go through flexerror(), which would longjmp back into
++   the end of flex_main() that called us.  */
++static void vms_filter_error (const char *what, const char *name)
++{
++	fprintf (stderr, "%s: %s %s\n", program_name, what, name);
++}
++
++/* Run the external filter F (m4) with the file IN as its standard input
++   and the file OUT as its standard output.  0 on success.  */
++static int vms_run_ext (struct filter *f, const char *in, const char *out)
++{
++	int     in_fd, out_fd, saved_in, saved_out, wstatus = 0;
++	pid_t   pid;
++	FILE   *o;
++
++	in_fd = open (in, O_RDONLY);
++	o = fopen (out, "w");
++	if (in_fd < 0 || o == NULL) {
++		vms_filter_error (_("cannot create temporary file"), out);
++		if (in_fd >= 0)
++			close (in_fd);
++		if (o)
++			fclose (o);
++		return -1;
++	}
++	out_fd = fileno (o);
++	fflush (stderr);
++	saved_in = dup (0);
++	saved_out = dup (1);
++	dup2 (in_fd, 0);
++	dup2 (out_fd, 1);
++	pid = vfork ();
++	if (pid == 0) {
++		/* On VMS vfork() creates no process; execv() does, and if it
++		   fails it returns here, in flex.  */
++		execv (f->argv[0], (char **) f->argv);
++		pid = -1;
++	}
++	if (saved_in >= 0) {
++		dup2 (saved_in, 0);
++		close (saved_in);
++	}
++	if (saved_out >= 0) {
++		dup2 (saved_out, 1);
++		close (saved_out);
++	}
++	close (in_fd);
++	fclose (o);
++	if (pid < 0) {
++		vms_filter_error (_("cannot run"), f->argv[0]);
++		return -1;
++	}
++	if (waitpid (pid, &wstatus, 0) != pid
++	    || !WIFEXITED (wstatus) || WEXITSTATUS (wstatus) != 0) {
++		vms_filter_error (_("failed:"), f->argv[0]);
++		return -1;
++	}
++	return 0;
++}
++
++/* Run the chain from F over the file IN, writing the result to FINAL.  */
++static int vms_run_chain (struct filter *f, const char *in, FILE *final)
++{
++	char    cur[80], next[80];
++	FILE   *i, *o;
++	int     c, rc = 0;
++
++	snprintf (cur, sizeof cur, "%s", in);
++	for (; f && rc == 0; f = f->next) {
++		vms_tmp_name (next, sizeof next, "STAGE");
++		if (f->filter_func == NULL)
++			rc = vms_run_ext (f, cur, next);
++		else if (f->filter_func == filter_fix_linedirs) {
++			i = fopen (cur, "r");
++			o = fopen (next, "w");
++			if (i && o)
++				fix_linedirs_streams (i, o);
++			else {
++				vms_filter_error (_("cannot create temporary file"), next);
++				rc = -1;
++			}
++			if (i)
++				fclose (i);
++			if (o && fclose (o) != 0)
++				rc = -1;
++		}
++		else {
++			vms_filter_error (_("unexpected filter in chain"), "");
++			rc = -1;
++		}
++		if (strcmp (cur, in) != 0)
++			vms_delete_all (cur);
++		snprintf (cur, sizeof cur, "%s", next);
++	}
++	if (rc == 0) {
++		/* putc, not fwrite: to a record-oriented output (a terminal, a
++		   batch log) the C RTL writes each fwrite item as a record.  */
++		i = fopen (cur, "r");
++		if (i == NULL)
++			rc = -1;
++		else {
++			while ((c = getc (i)) != EOF)
++				putc (c, final);
++			fclose (i);
++		}
++	}
++	if (strcmp (cur, in) != 0)
++		vms_delete_all (cur);
++	return rc;
++}
++
++bool filter_apply_chain (struct filter * chain)
++{
++	if (!chain)
++		return true;
++	fflush (stdout);
++	vms_chain = chain;
++	vms_out_fd = dup (fileno (stdout));
++	vms_tmp_name (vms_raw_name, sizeof vms_raw_name, "RAW");
++	if (vms_out_fd < 0 || freopen (vms_raw_name, "w", stdout) == NULL)
++		flexfatal (_("cannot create temporary file for the filter chain"));
++	return true;
++}
++
++/* Run the filter chain over flex's output (OK: flex succeeded; otherwise
++   just clean up).  0 on success.  */
++int filter_vms_finish (bool ok)
++{
++	struct filter *tee = vms_chain;
++	char    c_name[80], h_name[80];
++	FILE   *in, *to_c, *to_h = NULL, *final;
++	int     rc = 0;
++
++	if (!tee)
++		return 0;
++	vms_chain = NULL;
++	if (!ok) {
++		close (vms_out_fd);
++		vms_delete_all (vms_raw_name);
++		return 0;
++	}
++	final = fdopen (vms_out_fd, "w");
++	if (tee->filter_func != filter_tee_header) {
++		/* filter_truncate() left no tee: run the chain as it is.  */
++		rc = vms_run_chain (tee, vms_raw_name, final);
++		fclose (final);
++		vms_delete_all (vms_raw_name);
++		return rc;
++	}
++	vms_tmp_name (c_name, sizeof c_name, "C");
++	vms_tmp_name (h_name, sizeof h_name, "H");
++	in = fopen (vms_raw_name, "r");
++	to_c = fopen (c_name, "w");
++	if (tee->extra)
++		to_h = fopen (h_name, "w");
++	if (!in || !to_c || (tee->extra && !to_h)) {
++		vms_filter_error (_("cannot create temporary file"), c_name);
++		rc = -1;
++	}
++	else
++		tee_header_streams (in, to_c, to_h);
++	if (in)
++		fclose (in);
++	if (to_c)
++		fclose (to_c);
++	if (to_h)
++		fclose (to_h);
++	if (rc == 0)
++		rc = vms_run_chain (tee->next, c_name, final);
++	if (fclose (final) != 0)
++		rc = -1;
++	if (rc == 0 && tee->extra) {
++		final = fopen ((char *) tee->extra, "w");
++		if (final == NULL) {
++			vms_filter_error (_("cannot create"), (char *) tee->extra);
++			rc = -1;
++		}
++		else {
++			rc = vms_run_chain (tee->next, h_name, final);
++			if (fclose (final) != 0)
++				rc = -1;
++		}
++	}
++	vms_delete_all (vms_raw_name);
++	vms_delete_all (c_name);
++	vms_delete_all (h_name);
++	return rc;
++}
++
++#else /* def __VMS */
+ /** Fork and exec entire filter chain.
+  *  @param chain The head of the chain.
+  *  @return true on success.
+@@ -198,6 +433,8 @@
+ 	return true;
+ }
+ 
++#endif /* def __VMS [else] */
++
+ /** Truncate the chain to max_len number of filters.
+  * @param chain the current chain.
+  * @param max_len the maximum length of the chain.
+@@ -224,39 +461,13 @@
+  *  The header file name is in extra.
+  *  @return 0 (zero) on success, and -1 on failure.
+  */
+-int filter_tee_header (struct filter *chain)
++/* The text filter_tee_header() writes: the m4 prologue, a copy of IN, and
++   for the header the epilogue.  TO_H is NULL when there is no header.  */
++static void tee_header_streams (FILE *in, FILE *to_c, FILE *to_h)
+ {
+-	/* This function reads from stdin and writes to both the C file and the
+-	 * header file at the same time.
+-	 */
+-
+ 	const int readsz = 512;
+ 	char   *buf;
+-	int     to_cfd = -1;
+-	FILE   *to_c = NULL, *to_h = NULL;
+-	bool    write_header;
+-
+-	write_header = (chain->extra != NULL);
+-
+-	/* Store a copy of the stdout pipe, which is already piped to C file
+-	 * through the running chain. Then create a new pipe to the H file as
+-	 * stdout, and fork the rest of the chain again.
+-	 */
+-
+-	if ((to_cfd = dup (1)) == -1)
+-		flexfatal (_("dup(1) failed"));
+-	to_c = fdopen (to_cfd, "w");
+-
+-	if (write_header) {
+-		if (freopen ((char *) chain->extra, "w", stdout) == NULL)
+-			flexfatal (_("freopen(headerfilename) failed"));
+-
+-		filter_apply_chain (chain->next);
+-		to_h = stdout;
+-	}
+-
+-	/* Now to_c is a pipe to the C branch, and to_h is a pipe to the H branch.
+-	 */
++	bool    write_header = (to_h != NULL);
+ 
+ 	if (write_header) {
+         fputs (check_4_gnu_m4, to_h);
+@@ -286,7 +497,7 @@
+ 	buf = malloc((size_t) readsz);
+ 	if (!buf)
+ 		flexerror(_("malloc failed in filter_tee_header"));
+-	while (fgets (buf, readsz, stdin)) {
++	while (fgets (buf, readsz, in)) {
+ 		fputs (buf, to_c);
+ 		if (write_header)
+ 			fputs (buf, to_h);
+@@ -302,7 +513,45 @@
+ 		fprintf (to_h, "#undef %sIN_HEADER\n", prefix);
+ 		fprintf (to_h, "#endif /* %sHEADER_H */\n", prefix);
+ 		fputs ("m4_undefine( [[M4_YY_IN_HEADER]])m4_dnl\n", to_h);
++	}
++	free (buf);
++}
++
++int filter_tee_header (struct filter *chain)
++{
++	/* This function reads from stdin and writes to both the C file and the
++	 * header file at the same time.
++	 */
++
++	int     to_cfd = -1;
++	FILE   *to_c = NULL, *to_h = NULL;
++	bool    write_header;
++
++	write_header = (chain->extra != NULL);
+ 
++	/* Store a copy of the stdout pipe, which is already piped to C file
++	 * through the running chain. Then create a new pipe to the H file as
++	 * stdout, and fork the rest of the chain again.
++	 */
++
++	if ((to_cfd = dup (1)) == -1)
++		flexfatal (_("dup(1) failed"));
++	to_c = fdopen (to_cfd, "w");
++
++	if (write_header) {
++		if (freopen ((char *) chain->extra, "w", stdout) == NULL)
++			flexfatal (_("freopen(headerfilename) failed"));
++
++		filter_apply_chain (chain->next);
++		to_h = stdout;
++	}
++
++	/* Now to_c is a pipe to the C branch, and to_h is a pipe to the H branch.
++	 */
++
++	tee_header_streams (stdin, to_c, to_h);
++
++	if (write_header) {
+ 		fflush (to_h);
+ 		if (ferror (to_h))
+ 			lerr (_("error writing output file %s"),
+@@ -334,7 +583,8 @@
+  * not user code. This also happens to be a good place to squeeze multiple
+  * blank lines into a single blank line.
+  */
+-int filter_fix_linedirs (struct filter *chain)
++/* The work of filter_fix_linedirs(), from IN to OUT.  */
++static void fix_linedirs_streams (FILE *in, FILE *out)
+ {
+ 	char   *buf;
+ 	const size_t readsz = 512;
+@@ -342,14 +592,11 @@
+ 	bool    in_gen = true;	/* in generated code */
+ 	bool    last_was_blank = false;
+ 
+-	if (!chain)
+-		return 0;
+-
+ 	buf = malloc(readsz);
+ 	if (!buf)
+ 		flexerror(_("malloc failed in filter_fix_linedirs"));
+ 
+-	while (fgets (buf, (int) readsz, stdin)) {
++	while (fgets (buf, (int) readsz, in)) {
+ 
+ 		regmatch_t m[10];
+ 
+@@ -417,9 +664,18 @@
+ 			last_was_blank = false;
+ 		}
+ 
+-		fputs (buf, stdout);
++		fputs (buf, out);
+ 		lineno++;
+ 	}
++	free (buf);
++}
++
++int filter_fix_linedirs (struct filter *chain)
++{
++	if (!chain)
++		return 0;
++
++	fix_linedirs_streams (stdin, stdout);
+ 	fflush (stdout);
+ 	if (ferror (stdout))
+ 		lerr (_("error writing output file %s"),
+--- a/src/main.c	2026-10-04 23:10:14.444124502 +0100
++++ b/src/main.c	2026-10-04 23:11:31.154684006 +0100
+@@ -152,6 +152,12 @@
+             fflush(stdout);
+             fclose(stdout);
+         }
++#ifdef __VMS
++        /* No child processes: run the filter chain now (filter.c).  */
++        (void) child_status;
++        if (filter_vms_finish (exit_status == 1) != 0 && exit_status <= 1)
++            exit_status = 2;
++#else
+         while (wait(&child_status) > 0){
+             if (!WIFEXITED (child_status)
+                 || WEXITSTATUS (child_status) != 0){
+@@ -162,6 +168,7 @@
+ 
+             }
+         }
++#endif
+         return exit_status - 1;
+     }
+ 
+@@ -195,6 +202,11 @@
+ }
+ 
+ /* Wrapper around flex_main, so flex_main can be built as a library. */
++#ifdef __VMS
++/* vms/vms_exit.c: under DCL a failed run gets an error-severity status.  */
++extern void vms_exit (int status);
++#endif
++
+ int main (int argc, char *argv[])
+ {
+ #if ENABLE_NLS
+@@ -206,7 +218,12 @@
+ #endif
+ #endif
+ 
++#ifdef __VMS
++	vms_exit (flex_main (argc, argv));
++	return 0;
++#else
+ 	return flex_main (argc, argv);
++#endif
+ }
+ 
+ /* check_options - check user-specified options */
+@@ -341,6 +358,12 @@
+ 
+     /* Setup the filter chain. */
+     output_chain = filter_create_int(NULL, filter_tee_header, headerfilename);
++#ifdef __VMS
++    /* GNU m4 for OpenVMS (github.com/issinoho/vms-m4), the M4 kit; the M4
++       logical name or environment variable overrides it.  */
++    if ( !(m4 = getenv("M4")))
++        m4 = "M4$ROOT:[BIN]M4.EXE";
++#else
+     if ( !(m4 = getenv("M4"))) {
+ 	    char *slash;
+ 		m4 = M4;
+@@ -380,6 +403,7 @@
+ 			}
+ 		}
+ 	}
++#endif
+     filter_create_ext(output_chain, m4, "-P", 0);
+     filter_create_int(output_chain, filter_fix_linedirs, NULL);
+ 
+--- a/src/flexdef.h	2026-10-04 23:10:14.450124581 +0100
++++ b/src/flexdef.h	2026-10-04 23:11:19.434956652 +0100
+@@ -1125,6 +1125,9 @@
+ extern int filter_truncate(struct filter * chain, int max_len);
+ extern int filter_tee_header(struct filter *chain);
+ extern int filter_fix_linedirs(struct filter *chain);
++#ifdef __VMS
++extern int filter_vms_finish(bool ok);
++#endif
+ 
+ 
+ /*
