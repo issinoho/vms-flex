@@ -1,0 +1,21 @@
+Subject: main: on OpenVMS, keep the program name "flex"
+
+flex takes its name for messages and --version from argv[0].  On VMS
+that is the image's file specification ("FLEX.EXE", or a full
+"dev:[dir]FLEX.EXE;1"), so --version printed "FLEX.EXE 2.6.4".  Keep
+the built-in "flex" there.
+
+--- a/src/main.c	2026-10-04 23:16:57.489772374 +0100
++++ b/src/main.c	2026-10-04 23:16:57.490494774 +0100
+@@ -1018,7 +1018,11 @@
+     flex_init_regex();
+ 
+ 	/* Enable C++ if program name ends with '+'. */
++#ifndef __VMS
++	/* On VMS argv[0] is the image's file specification ("FLEX.EXE" or
++	   "dev:[dir]FLEX.EXE;1"); keep the name "flex" for messages.  */
+ 	program_name = basename (argv[0]);
++#endif
+ 
+ 	if (program_name != NULL &&
+ 	    program_name[strlen (program_name) - 1] == '+')

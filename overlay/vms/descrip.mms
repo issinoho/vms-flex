@@ -16,17 +16,40 @@ BIN = [.BIN_$(ARCH)]
 
 .INCLUDE [.VMS]SOURCES.MMS
 
-LIB = $(OBJ)LIBFL.OLB
+LIBFL = $(OBJ)LIBFL.OLB
+LIBFL_AS_IS = $(OBJ)LIBFL_AS_IS.OLB
 EXE = $(BIN)FLEX.EXE
 
 CC = CC
 CFLAGS = $(CC_QUAL)/NOLIST/INCLUDE_DIRECTORY=("./src","./vms","PCRE2$ROOT:[INCLUDE]")-
 	/DEFINE=($(CC_DEFS),HAVE_CONFIG_H)
 
-! LIBFL.OLB is flex's runtime library for lex programs (yywrap, main),
-! installed by the kit; flex itself does not link it.
-ALL : $(EXE), $(LIB)
+! libfl, flex's runtime library for lex programs (yywrap, main), installed by
+! the kit; flex itself does not link it.  Built twice: LIBFL.OLB with VSI
+! C's default /NAMES=UPPERCASE, for scanners compiled with a plain CC, and
+! LIBFL_AS_IS.OLB with /NAMES=(AS_IS,SHORTENED), for scanners compiled so.
+ALL : $(EXE), $(LIBFL), $(LIBFL_AS_IS)
 	@ CONTINUE
+
+LIBFL_CC = CC/NOLIST/NAMES=(UPPERCASE,TRUNCATED)
+LIBFL_AS_IS_CC = CC/NOLIST/NAMES=(AS_IS,SHORTENED)
+
+$(LIBFL) : $(LOBJ)LIBMAIN.OBJ, $(LOBJ)LIBYYWRAP.OBJ
+	IF F$SEARCH("$(MMS$TARGET)") .EQS. "" THEN LIBRARY/CREATE/OBJECT $(MMS$TARGET)
+	LIBRARY/REPLACE/OBJECT $(MMS$TARGET) $(LOBJ)LIBMAIN.OBJ, $(LOBJ)LIBYYWRAP.OBJ
+
+$(LIBFL_AS_IS) : $(LOBJ)LIBMAIN_AS_IS.OBJ, $(LOBJ)LIBYYWRAP_AS_IS.OBJ
+	IF F$SEARCH("$(MMS$TARGET)") .EQS. "" THEN LIBRARY/CREATE/OBJECT $(MMS$TARGET)
+	LIBRARY/REPLACE/OBJECT $(MMS$TARGET) $(LOBJ)LIBMAIN_AS_IS.OBJ, $(LOBJ)LIBYYWRAP_AS_IS.OBJ
+
+$(LOBJ)LIBMAIN.OBJ : [.SRC]libmain.c
+	$(LIBFL_CC) /OBJECT=$(MMS$TARGET) $(MMS$SOURCE)
+$(LOBJ)LIBYYWRAP.OBJ : [.SRC]libyywrap.c
+	$(LIBFL_CC) /OBJECT=$(MMS$TARGET) $(MMS$SOURCE)
+$(LOBJ)LIBMAIN_AS_IS.OBJ : [.SRC]libmain.c
+	$(LIBFL_AS_IS_CC) /OBJECT=$(MMS$TARGET) $(MMS$SOURCE)
+$(LOBJ)LIBYYWRAP_AS_IS.OBJ : [.SRC]libyywrap.c
+	$(LIBFL_AS_IS_CC) /OBJECT=$(MMS$TARGET) $(MMS$SOURCE)
 
 ! "-": LINK ends with a warning status (%ILINK-W-COMPWARN) when modules
 ! compiled with VSI C's benign warnings; tools/build.sh fails the build on
@@ -35,10 +58,6 @@ ALL : $(EXE), $(LIB)
 $(EXE) : $(SRC_OBJS), $(EXTRA_OBJS)
 	- LINK/EXECUTABLE=$(MMS$TARGET)/MAP=$(OBJ)FLEX.MAP/FULL $(SRC_OBJS), $(EXTRA_OBJS), -
 	PCRE2$ROOT:[LIB]PCRE2-POSIX.OLB/LIBRARY, PCRE2$ROOT:[LIB]PCRE2-8.OLB/LIBRARY
-
-$(LIB) : $(LIB_OBJS)
-	IF F$SEARCH("$(MMS$TARGET)") .EQS. "" THEN LIBRARY/CREATE/OBJECT $(MMS$TARGET)
-	LIBRARY/REPLACE/OBJECT $(MMS$TARGET) $(LOBJ)*.OBJ
 
 CLEAN :
 	IF F$SEARCH("$(LOBJ)*.*") .NES. "" THEN DELETE/NOLOG $(LOBJ)*.*;*

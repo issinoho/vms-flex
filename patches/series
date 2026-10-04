@@ -1,2 +1,4 @@
 # Ordered list of patches applied to the upstream tree (one per line).
 0001-filter-chain-without-fork-vms.patch
+0002-declare-rpl-realloc.patch
+0003-program-name-vms.patch

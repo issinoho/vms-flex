@@ -1,0 +1,25 @@
+Subject: flexdef.h: declare rpl_realloc when config.h substitutes it
+
+On a system where realloc (p, 0) returns NULL (OpenVMS), configure
+defines realloc as rpl_realloc and links lib/realloc.c.  Most sources
+include config.h before <stdlib.h>, so the system prototype is renamed
+too; the generated scan.c includes <stdlib.h> first, and then calls
+rpl_realloc with no declaration in scope, an error with VSI C.  Declare
+it in flexdef.h, after <stdlib.h>.
+
+--- a/src/flexdef.h	2026-10-04 23:15:35.093303760 +0100
++++ b/src/flexdef.h	2026-10-04 23:15:35.093794239 +0100
+@@ -41,6 +41,13 @@
+ 
+ #include <stdio.h>
+ #include <stdlib.h>
++/* config.h defines realloc as rpl_realloc (lib/realloc.c) when the system's
++   realloc (p, 0) returns NULL, as on OpenVMS.  Files that include
++   <stdlib.h> before this header (the generated scan.c) then call
++   rpl_realloc with no declaration in scope; declare it.  */
++#ifdef realloc
++void *rpl_realloc (void *, size_t);
++#endif
+ #include <stdarg.h>
+ #include <setjmp.h>
+ #include <ctype.h>
