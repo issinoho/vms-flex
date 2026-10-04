@@ -1,0 +1,33 @@
+# Hand-settled configure answers for OpenVMS (VSI C, both IA64 and x86-64).
+#
+# Loaded after the VSI C configure answers, so values here win.  Use this for checks the
+# VSI C configure run cannot answer: run-time behaviour tests (AC_RUN_IFELSE),
+# compiler-feature tests, and anything it got wrong.  Give a reason
+# for every entry.
+
+# x86 CRTL has pthread_sigmask, IA64 does not.  wget is built without threads,
+# so use sigprocmask on both for identical behaviour.
+ac_cv_func_pthread_sigmask=no
+
+# configure reads byte order out of an object file in cross mode, which
+# vmscc does not return.  IA64 (as used by VMS) and x86-64 are little-endian.
+ac_cv_c_bigendian=no
+
+# The CRTL's <string.h> provides mempcpy as a function-like macro (no linkable
+# symbol), so configure's link test says "no"; gnulib's replacement
+# declaration then collides with the macro.  Use the CRTL macro.
+ac_cv_func_mempcpy=yes
+gl_cv_onwards_func_mempcpy=yes
+
+
+# struct sched_param is in <pthread.h> on VMS (gnulib knows; patch 0004 makes
+# configure ask for host "openvms").  The VSI C configure run predates that
+# patch and never asked, so record the answer here.
+ac_cv_type_struct_sched_param=yes
+
+# The C RTL's malloc(0) returns a usable non-null pointer (checked on both
+# nodes); configure cannot run its test in cross mode and would otherwise
+# use flex's lib/malloc.c replacement.  realloc(p, 0) frees p and returns
+# NULL, so flex's lib/realloc.c replacement is used.
+ac_cv_func_malloc_0_nonnull=yes
+ac_cv_func_realloc_0_nonnull=no

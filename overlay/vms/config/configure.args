@@ -1,0 +1,10 @@
+# Options for configure (one per line); both the VSI C run (vms_configure.sh)
+# and the host run in prepare.sh use them.
+# No message catalogues on VMS.
+--disable-nls
+--disable-dependency-tracking
+# Build flex from the shipped scan.c; do not regenerate it with a stage-1 flex.
+--disable-bootstrap
+# libtool: only the static libfl (the MMS build makes LIBFL.OLB itself).
+--disable-shared
+--enable-static
