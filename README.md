@@ -22,6 +22,8 @@ compile and link test sent to VSI C on the node, and MMS builds the result.
 
 ## Status
 
+**Released: [v2.6.4-vms1](https://github.com/issinoho/vms-flex/releases/tag/v2.6.4-vms1).**
+
 | | IA64 (OpenVMS V8.4-2L3, VSI C 7.4) | x86-64 (OpenVMS E9.2-4, VSI C 7.7) |
 |---|---|---|
 | VSI C configure answers (identical on both) | yes | yes |
