@@ -7,12 +7,17 @@ directives.  OpenVMS has no fork().  Every stage reads all its input
 before it ends, so on VMS the stages run one after another over temporary
 files in SYS$SCRATCH once flex has finished writing:
 
-- filter_apply_chain() diverts flex's output to a file and keeps a
-  duplicate of the real output descriptor (the -o file, or stdout);
+- filter_apply_chain() points flex's stdout at a temporary file (dup2,
+  not freopen, which would leave a new version of a file stdout is
+  redirected to) and keeps a duplicate of the real output descriptor;
 - filter_vms_finish(), called from flex_main()'s exit path in place of
-  the wait() loop, runs tee_header, then for each branch m4 (started with
-  vfork()/execv(), standard input and output redirected; a failed execv()
-  returns in flex, so it is reported, not _exit()ed) and fix_linedirs.
+  the wait() loop, runs tee_header, then for each branch m4 and
+  fix_linedirs.  m4 runs in a subprocess (LIB$SPAWN) executing a small
+  generated procedure that drops the SYS$OUTPUT/SYS$ERROR it inherits and
+  points its SYS$INPUT/SYS$OUTPUT at the temporary files: a vfork()/execv()
+  child inherits a SYS$OUTPUT redirected to a file and opens it, leaving a
+  new, empty version of the user's file or writing there.  The arguments
+  are quoted, so DCL keeps their case.
 
 The text of tee_header and the work of fix_linedirs move into
 tee_header_streams() and fix_linedirs_streams(), which the Unix filters
@@ -21,8 +26,8 @@ M4$ROOT:[BIN]M4.EXE (the M4 logical name overrides it), and main() exits
 through vms_exit() so that a failed run has error severity under DCL.
 
 --- a/src/filter.c	2026-10-04 23:10:14.436124398 +0100
-+++ b/src/filter.c	2026-10-04 23:11:19.434701615 +0100
-@@ -22,6 +22,15 @@
++++ b/src/filter.c	2026-10-04 23:26:00.128966076 +0100
+@@ -22,6 +22,14 @@
  /*  PURPOSE. */
  
  #include "flexdef.h"
@@ -33,12 +38,11 @@ through vms_exit() so that a failed run has error severity under DCL.
 +# include <fcntl.h>
 +# include <lib$routines.h>
 +# include <unistd.h>
-+# include <wait.h>
 +#endif
  static const char * check_4_gnu_m4 =
      "m4_dnl ifdef(`__gnu__', ,"
      "`errprint(Flex requires GNU M4. Set the PATH or set the M4 environment variable to its path name.)"
-@@ -121,6 +130,232 @@
+@@ -121,6 +129,275 @@
  	return f;
  }
  
@@ -50,8 +54,7 @@ through vms_exit() so that a failed run has error severity under DCL.
 +   output to a file and remembers where the real output goes, and
 +   filter_vms_finish() (called from flex_main() at the end) runs the chain:
 +   tee_header splits the C file and the header, and each goes through m4
-+   (a separate process, started with vfork() and execv()) and fix_linedirs
-+   (here, in flex).  */
++   (a subprocess, see vms_run_ext()) and fix_linedirs (here, in flex).  */
 +
 +static struct filter *vms_chain;	/* the chain to run at the end */
 +static int vms_out_fd = -1;		/* the real output (-o file or stdout) */
@@ -86,56 +89,93 @@ through vms_exit() so that a failed run has error severity under DCL.
 +}
 +
 +/* Run the external filter F (m4) with the file IN as its standard input
-+   and the file OUT as its standard output.  0 on success.  */
++   and the file OUT as its standard output.  0 on success.
++
++   It runs in a subprocess (LIB$SPAWN) executing a small generated DCL
++   procedure, not with vfork()/execv(): a child created that way inherits
++   flex's SYS$OUTPUT, and when that is redirected to a file the child opens
++   it (a new, empty version of the user's file) or even writes there.  The
++   procedure drops the SYS$OUTPUT and SYS$ERROR it inherits, points its
++   own SYS$INPUT and SYS$OUTPUT at IN and OUT, and runs the image with
++   every argument quoted, so DCL keeps their case.  The subprocess's own
++   output (m4's error messages) goes to a temporary log, copied to
++   stderr afterwards.  */
 +static int vms_run_ext (struct filter *f, const char *in, const char *out)
 +{
-+	int     in_fd, out_fd, saved_in, saved_out, wstatus = 0;
-+	pid_t   pid;
-+	FILE   *o;
++	char    com[80], log[80], spawncmd[96];
++	struct dsc$descriptor_s cmd_d, log_d;
++	unsigned int status, completion = 0;
++	const char **a;
++	FILE   *c;
++	int     rc = 0;
 +
-+	in_fd = open (in, O_RDONLY);
-+	o = fopen (out, "w");
-+	if (in_fd < 0 || o == NULL) {
-+		vms_filter_error (_("cannot create temporary file"), out);
-+		if (in_fd >= 0)
-+			close (in_fd);
-+		if (o)
-+			fclose (o);
++	vms_tmp_name (com, sizeof com, "COM");
++	vms_tmp_name (log, sizeof log, "LOG");
++	c = fopen (com, "w");
++	if (c == NULL) {
++		vms_filter_error (_("cannot create temporary file"), com);
 +		return -1;
 +	}
-+	out_fd = fileno (o);
++	fputs ("$ set noon\n"
++	       "$ set message/nofacility/noseverity/noidentification/notext\n"
++	       "$ if f$trnlnm(\"SYS$OUTPUT\",\"LNM$PROCESS\",,\"USER\") .nes. \"\""
++	       " then deassign/user sys$output\n"
++	       "$ if f$trnlnm(\"SYS$OUTPUT\",\"LNM$PROCESS\",,\"SUPERVISOR\") .nes. \"\""
++	       " then deassign sys$output\n"
++	       "$ if f$trnlnm(\"SYS$ERROR\",\"LNM$PROCESS\",,\"USER\") .nes. \"\""
++	       " then deassign/user sys$error\n"
++	       "$ if f$trnlnm(\"SYS$ERROR\",\"LNM$PROCESS\",,\"SUPERVISOR\") .nes. \"\""
++	       " then deassign sys$error\n"
++	       "$ set message/facility/severity/identification/text\n", c);
++	fprintf (c, "$ define/user sys$input %s\n", in);
++	fprintf (c, "$ define/user sys$output %s\n", out);
++	fprintf (c, "$ mcr %s", f->argv[0]);
++	for (a = f->argv + 1; *a; a++) {
++		const char *p;
++		fputs (" \"", c);
++		for (p = *a; *p; p++) {
++			if (*p == '"')
++				putc ('"', c);	/* DCL doubles quotes */
++			putc (*p, c);
++		}
++		putc ('"', c);
++	}
++	fputs ("\n$ exit $status\n", c);
++	if (fclose (c) != 0) {
++		vms_delete_all (com);
++		return -1;
++	}
++
++	snprintf (spawncmd, sizeof spawncmd, "@%s", com);
++	cmd_d.dsc$w_length = (unsigned short) strlen (spawncmd);
++	cmd_d.dsc$b_dtype = DSC$K_DTYPE_T;
++	cmd_d.dsc$b_class = DSC$K_CLASS_S;
++	cmd_d.dsc$a_pointer = spawncmd;
++	log_d.dsc$w_length = (unsigned short) strlen (log);
++	log_d.dsc$b_dtype = DSC$K_DTYPE_T;
++	log_d.dsc$b_class = DSC$K_CLASS_S;
++	log_d.dsc$a_pointer = log;
 +	fflush (stderr);
-+	saved_in = dup (0);
-+	saved_out = dup (1);
-+	dup2 (in_fd, 0);
-+	dup2 (out_fd, 1);
-+	pid = vfork ();
-+	if (pid == 0) {
-+		/* On VMS vfork() creates no process; execv() does, and if it
-+		   fails it returns here, in flex.  */
-+		execv (f->argv[0], (char **) f->argv);
-+		pid = -1;
++	status = lib$spawn (&cmd_d, 0, &log_d, 0, 0, 0, &completion,
++			    0, 0, 0, 0, 0, 0);
++	vms_delete_all (com);
++	c = fopen (log, "r");
++	if (c != NULL) {
++		int ch;
++		while ((ch = getc (c)) != EOF)
++			putc (ch, stderr);
++		fclose (c);
 +	}
-+	if (saved_in >= 0) {
-+		dup2 (saved_in, 0);
-+		close (saved_in);
-+	}
-+	if (saved_out >= 0) {
-+		dup2 (saved_out, 1);
-+		close (saved_out);
-+	}
-+	close (in_fd);
-+	fclose (o);
-+	if (pid < 0) {
++	vms_delete_all (log);
++	if (!(status & 1)) {
 +		vms_filter_error (_("cannot run"), f->argv[0]);
-+		return -1;
++		rc = -1;
 +	}
-+	if (waitpid (pid, &wstatus, 0) != pid
-+	    || !WIFEXITED (wstatus) || WEXITSTATUS (wstatus) != 0) {
++	else if (!(completion & 1)) {
 +		vms_filter_error (_("failed:"), f->argv[0]);
-+		return -1;
++		rc = -1;
 +	}
-+	return 0;
++	return rc;
 +}
 +
 +/* Run the chain from F over the file IN, writing the result to FINAL.  */
@@ -191,14 +231,21 @@ through vms_exit() so that a failed run has error severity under DCL.
 +
 +bool filter_apply_chain (struct filter * chain)
 +{
++	int     raw_fd;
++
 +	if (!chain)
 +		return true;
 +	fflush (stdout);
 +	vms_chain = chain;
-+	vms_out_fd = dup (fileno (stdout));
 +	vms_tmp_name (vms_raw_name, sizeof vms_raw_name, "RAW");
-+	if (vms_out_fd < 0 || freopen (vms_raw_name, "w", stdout) == NULL)
++	/* Point stdout's descriptor at the temporary file with dup2(), not
++	   freopen(): reopening a stdout redirected by DCL (DEFINE SYS$OUTPUT)
++	   leaves a new, empty version of the redirection's file.  */
++	vms_out_fd = dup (fileno (stdout));
++	raw_fd = open (vms_raw_name, O_WRONLY | O_CREAT | O_TRUNC, 0600);
++	if (vms_out_fd < 0 || raw_fd < 0 || dup2 (raw_fd, fileno (stdout)) < 0)
 +		flexfatal (_("cannot create temporary file for the filter chain"));
++	close (raw_fd);
 +	return true;
 +}
 +
@@ -271,7 +318,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  /** Fork and exec entire filter chain.
   *  @param chain The head of the chain.
   *  @return true on success.
-@@ -198,6 +433,8 @@
+@@ -198,6 +475,8 @@
  	return true;
  }
  
@@ -280,7 +327,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  /** Truncate the chain to max_len number of filters.
   * @param chain the current chain.
   * @param max_len the maximum length of the chain.
-@@ -224,39 +461,13 @@
+@@ -224,39 +503,13 @@
   *  The header file name is in extra.
   *  @return 0 (zero) on success, and -1 on failure.
   */
@@ -324,7 +371,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  
  	if (write_header) {
          fputs (check_4_gnu_m4, to_h);
-@@ -286,7 +497,7 @@
+@@ -286,7 +539,7 @@
  	buf = malloc((size_t) readsz);
  	if (!buf)
  		flexerror(_("malloc failed in filter_tee_header"));
@@ -333,7 +380,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  		fputs (buf, to_c);
  		if (write_header)
  			fputs (buf, to_h);
-@@ -302,7 +513,45 @@
+@@ -302,7 +555,45 @@
  		fprintf (to_h, "#undef %sIN_HEADER\n", prefix);
  		fprintf (to_h, "#endif /* %sHEADER_H */\n", prefix);
  		fputs ("m4_undefine( [[M4_YY_IN_HEADER]])m4_dnl\n", to_h);
@@ -352,7 +399,7 @@ through vms_exit() so that a failed run has error severity under DCL.
 +	bool    write_header;
 +
 +	write_header = (chain->extra != NULL);
- 
++
 +	/* Store a copy of the stdout pipe, which is already piped to C file
 +	 * through the running chain. Then create a new pipe to the H file as
 +	 * stdout, and fork the rest of the chain again.
@@ -374,12 +421,12 @@ through vms_exit() so that a failed run has error severity under DCL.
 +	 */
 +
 +	tee_header_streams (stdin, to_c, to_h);
-+
+ 
 +	if (write_header) {
  		fflush (to_h);
  		if (ferror (to_h))
  			lerr (_("error writing output file %s"),
-@@ -334,7 +583,8 @@
+@@ -334,7 +625,8 @@
   * not user code. This also happens to be a good place to squeeze multiple
   * blank lines into a single blank line.
   */
@@ -389,7 +436,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  {
  	char   *buf;
  	const size_t readsz = 512;
-@@ -342,14 +592,11 @@
+@@ -342,14 +634,11 @@
  	bool    in_gen = true;	/* in generated code */
  	bool    last_was_blank = false;
  
@@ -405,7 +452,7 @@ through vms_exit() so that a failed run has error severity under DCL.
  
  		regmatch_t m[10];
  
-@@ -417,9 +664,18 @@
+@@ -417,9 +706,18 @@
  			last_was_blank = false;
  		}
  
