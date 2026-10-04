@@ -27,7 +27,7 @@ compile and link test sent to VSI C on the node, and MMS builds the result.
 | VSI C configure answers (identical on both) | yes | yes |
 | Builds | yes | yes |
 | Smoke test: generate a scanner (flex runs m4) with a header, compile it, link it with `LIBFL` and `LIBFL_AS_IS` and run it, `-t` to a redirected `SYS$OUTPUT`, scanner error and missing m4 give error statuses, no temporary files left | 11/11 | 11/11 |
-| Kit install (with the M4 kit), generate, link and run a scanner from the kit, remove | @IA64_IC@ | @X86_IC@ |
+| Kit install (with the M4 kit), generate, link and run a scanner from the kit, remove | pending | pending |
 | PCSI kit (`FLEX`, `V2.6-4E1`, requires `M4`) | `ISSINOHO-I64VMS-FLEX-V0206-4E1-1.PCSI` | `ISSINOHO-X86VMS-FLEX-V0206-4E1-1.PCSI` |
 
 ## Installing the kit
