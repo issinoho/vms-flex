@@ -16,8 +16,9 @@ belongs to the same family as [GNU grep](https://github.com/issinoho/vms-grep),
 [GNU Bison](https://github.com/issinoho/vms-bison),
 [GNU Wget](https://github.com/issinoho/vms-wget), [curl](https://github.com/issinoho/vms-curl),
 [PCRE2](https://github.com/issinoho/vms-pcre2), [zlib](https://github.com/issinoho/vms-zlib),
-[bzip2](https://github.com/issinoho/vms-bzip2), [XZ Utils](https://github.com/issinoho/vms-xz) and
-[Zstandard](https://github.com/issinoho/vms-zstd) for OpenVMS.
+[bzip2](https://github.com/issinoho/vms-bzip2), [XZ Utils](https://github.com/issinoho/vms-xz),
+[Zstandard](https://github.com/issinoho/vms-zstd)
+and [MariaDB](https://github.com/issinoho/vms-mariadb) for OpenVMS.
 
 This repository holds **only our changes**: every build starts from the signed flex release
 tarball (Will Estes's key, pinned in `keys/`), applies our patches and adds our VMS files.
@@ -112,7 +113,7 @@ tools/kit.sh ia64           # PCSI kit -> out/kits/
 2. Offer patch 0001 (the filter chain without `fork()`) and 0002 to flex.
 3. A port to OpenVMS **Alpha**.
 
-The family of ports, all for IA64 and x86-64, each following its upstream releases:
+The family of ports, all for IA64 and x86-64 (MariaDB: x86-64 only), each following its upstream releases:
 
 | Port | Latest release | |
 |---|---|---|
@@ -132,6 +133,7 @@ The family of ports, all for IA64 and x86-64, each following its upstream releas
 | GNU make — [vms-make](https://github.com/issinoho/vms-make) | [v4.4.1-vms1](https://github.com/issinoho/vms-make/releases/tag/v4.4.1-vms1) | built with make's own VMS port |
 | GNU diffutils — [vms-diffutils](https://github.com/issinoho/vms-diffutils) | [v3.12-vms1](https://github.com/issinoho/vms-diffutils/releases/tag/v3.12-vms1) | cmp, diff, diff3, sdiff |
 | GNU patch — [vms-patch](https://github.com/issinoho/vms-patch) | [v2.8-vms1](https://github.com/issinoho/vms-patch/releases/tag/v2.8-vms1) | applies diffs |
+| MariaDB — [vms-mariadb](https://github.com/issinoho/vms-mariadb) | [v11.4.13-vms1](https://github.com/issinoho/vms-mariadb/releases/tag/v11.4.13-vms1) | server and clients; x86-64 only, preview |
 
 ## Artwork
 
