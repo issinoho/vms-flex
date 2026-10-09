@@ -4,6 +4,8 @@
 
 # flex for OpenVMS
 
+[![Downloads](https://img.shields.io/github/downloads/issinoho/vms-flex/total?label=downloads)](https://github.com/issinoho/vms-flex/releases)
+
 [flex](https://github.com/westes/flex) (**2.6.4**), the fast lexical analyser generator, built
 natively for OpenVMS on **IA64** and **x86-64**, following flex's own releases. flex runs GNU m4 to
 generate its scanners; it uses [GNU m4 for OpenVMS](https://github.com/issinoho/vms-m4), and takes
