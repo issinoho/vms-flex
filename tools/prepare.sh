@@ -127,7 +127,7 @@ subst() {
         -e "s/@PCSIVERSION@/$pcsiversion/g" -e "s/@VERSION@/$UPSTREAM_VERSION/g" \
         -e "s/@KITVERSION@/$kitversion/g" -e "s/@ARCH@/$2/g"
 }
-for base in I64VMS X86VMS; do
+for base in I64VMS X86VMS AXPVMS; do
     subst $base "" < "$kit/flex.pcsi\$desc_template" > "$kit/FLEX-$base.PCSI\$DESC"
     subst $base "" < "$kit/flex.pcsi\$text_template" > "$kit/FLEX-$base.PCSI\$TEXT"
 done
